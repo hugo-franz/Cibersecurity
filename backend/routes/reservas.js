@@ -5,35 +5,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { encrypt, decrypt, hashData, verifyHash, sanitizeInput, signData, verifySignature } = require('../utils/security');
 const { getPrivateKey, getPublicKey, canonicalReservaPayload } = require('../utils/keys');
-
-// Middleware para verificar CSRF
-const verifyCSRF = (req, res, next) => {
-    const csrfToken = req.cookies.csrfToken || req.headers['x-csrf-token'];
-    const clientCSRF = req.body._csrf || req.headers['x-csrf-token'];
-
-    if (!csrfToken || !clientCSRF || csrfToken !== clientCSRF) {
-        return res.status(403).json({ success: false, message: 'Error de validación CSRF' });
-    }
-
-    next();
-};
-
-// Middleware para verificar token
-const verifyToken = (req, res, next) => {
-    const token = req.cookies.token || req.headers['authorization']?.split(' ')[1];
-
-    if (!token) {
-        return res.status(401).json({ success: false, message: 'Token no proporcionado' });
-    }
-
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user = decoded;
-        next();
-    } catch (error) {
-        return res.status(401).json({ success: false, message: 'Token inválido' });
-    }
-};
+const { verifyToken, verifyCSRF, verifyAdmin, validateNumericParam } = require('../middleware/auth');
 
 // Obtener reservas del usuario actual
 router.get('/mis-reservas', verifyToken, async (req, res) => {
@@ -167,14 +139,9 @@ router.post('/crear', verifyToken, verifyCSRF, async (req, res) => {
 });
 
 // Cancelar reserva
-router.put('/cancelar/:id', verifyToken, verifyCSRF, async (req, res) => {
+router.put('/cancelar/:id', validateNumericParam('id'), verifyToken, verifyCSRF, async (req, res) => {
     try {
         const id_reservacion = req.params.id;
-
-        // Validar que el ID sea numérico (defensa en profundidad anti-SQLi)
-        if (!/^\d+$/.test(id_reservacion)) {
-            return res.status(400).json({ success: false, message: 'ID inválido' });
-        }
 
         // Verificar que la reserva pertenezca al usuario
         const [reserva] = await pool.query(
@@ -206,13 +173,9 @@ router.put('/cancelar/:id', verifyToken, verifyCSRF, async (req, res) => {
 });
 
 // Endpoint para que un cliente verifique manualmente una reserva contra su firma
-router.get('/verificar/:id', verifyToken, async (req, res) => {
+router.get('/verificar/:id', validateNumericParam('id'), verifyToken, async (req, res) => {
     try {
         const id_reservacion = req.params.id;
-
-        if (!/^\d+$/.test(id_reservacion)) {
-            return res.status(400).json({ success: false, message: 'ID inválido' });
-        }
 
         const [reservas] = await pool.query(
             'SELECT * FROM reservaciones WHERE id_reservacion = ? AND id_usuario = ?',
@@ -251,14 +214,6 @@ router.get('/verificar/:id', verifyToken, async (req, res) => {
         res.status(500).json({ success: false, message: 'Error al verificar firma' });
     }
 });
-
-// Middleware para verificar que sea administrador
-const verifyAdmin = (req, res, next) => {
-    if (req.user.rol !== 1) {
-        return res.status(403).json({ success: false, message: 'Acceso denegado. Solo administradores.' });
-    }
-    next();
-};
 
 // Obtener todas las reservaciones (solo admin)
 router.get('/todas', verifyToken, verifyAdmin, async (req, res) => {
