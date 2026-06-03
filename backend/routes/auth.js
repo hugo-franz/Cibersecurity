@@ -8,6 +8,10 @@ const passport = require('passport');
 const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
 const { encrypt, decrypt, hashData, verifyHash, sanitizeInput } = require('../utils/security');
+const { getPublicKey } = require('../utils/keys');
+const { loginLimiter, registroLimiter, recuperarLimiter, sensitiveLimiter } = require('../middleware/rateLimit');
+const { passwordPolicyMiddleware } = require('../utils/passwordPolicy');
+const { verifyToken, verifyCSRF } = require('../middleware/auth');
 
 require('../config/passport');
 
@@ -24,7 +28,7 @@ router.get('/csrf-token', (req, res) => {
 });
 
 // Registro de usuario
-router.post('/registro', async (req, res) => {
+router.post('/registro', registroLimiter, passwordPolicyMiddleware, async (req, res) => {
     try {
         const { nombre, apellido, telefono, email, password } = req.body;
 
@@ -83,12 +87,27 @@ router.post('/registro', async (req, res) => {
 });
 
 // Login
-router.post('/login', async (req, res) => {
-    try {
-        const { telefono, password } = req.body;
+router.post('/login', loginLimiter, async (req, res) => {
+    const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+    const userAgent = req.headers['user-agent'] || null;
+    const { telefono, password } = req.body;
 
+    // Helper para auditar intentos sin romper la respuesta si la BD falla
+    const registrarIntento = async (exitoso, razon = null) => {
+        try {
+            await pool.query(
+                'INSERT INTO intentos_login (telefono, ip_address, user_agent, exitoso, razon_fallo) VALUES (?, ?, ?, ?, ?)',
+                [telefono || 'unknown', ip, userAgent, exitoso, razon]
+            );
+        } catch (e) {
+            console.error('No se pudo registrar intento de login:', e.message);
+        }
+    };
+
+    try {
         // Validar campos
         if (!telefono || !password) {
+            await registrarIntento(false, 'campos_faltantes');
             return res.status(400).json({ 
                 success: false, 
                 message: 'Teléfono y contraseña son requeridos' 
@@ -102,6 +121,7 @@ router.post('/login', async (req, res) => {
         );
 
         if (users.length === 0) {
+            await registrarIntento(false, 'usuario_no_existe');
             return res.status(401).json({ 
                 success: false, 
                 message: 'Credenciales inválidas' 
@@ -114,6 +134,7 @@ router.post('/login', async (req, res) => {
         const validPassword = await bcrypt.compare(password, user.password_hash);
 
         if (!validPassword) {
+            await registrarIntento(false, 'password_incorrecto');
             return res.status(401).json({ 
                 success: false, 
                 message: 'Credenciales inválidas' 
@@ -159,6 +180,9 @@ router.post('/login', async (req, res) => {
             path: '/'
         });
 
+        // Registrar login exitoso en auditoría
+        await registrarIntento(true);
+
         // Enviar datos de usuario en respuesta
         res.json({ 
             success: true, 
@@ -175,6 +199,7 @@ router.post('/login', async (req, res) => {
 
     } catch (error) {
         console.error('Error en login:', error);
+        await registrarIntento(false, 'error_servidor');
         res.status(500).json({ 
             success: false, 
             message: 'Error al iniciar sesión' 
@@ -183,7 +208,7 @@ router.post('/login', async (req, res) => {
 });
 
 // Recuperar contraseña
-router.post('/recuperar', async (req, res) => {
+router.post('/recuperar', recuperarLimiter, async (req, res) => {
     try {
         const { telefono, email } = req.body;
 
@@ -236,7 +261,7 @@ router.post('/recuperar', async (req, res) => {
 });
 
 // Restablecer contraseña
-router.post('/restablecer', async (req, res) => {
+router.post('/restablecer', passwordPolicyMiddleware, async (req, res) => {
     try {
         const { token, nuevaPassword } = req.body;
 
@@ -310,67 +335,6 @@ router.post('/logout', async (req, res) => {
     }
 });
 
-// Middleware para verificar CSRF
-const verifyCSRF = (req, res, next) => {
-    const csrfToken = req.cookies.csrfToken || req.headers['x-csrf-token'];
-    const clientCSRF = req.body._csrf || req.headers['x-csrf-token'];
-    
-    if (!csrfToken || !clientCSRF || csrfToken !== clientCSRF) {
-        return res.status(403).json({ success: false, message: 'Error de validación CSRF' });
-    }
-    
-    next();
-};
-
-// Middleware para verificar token
-const verifyToken = async (req, res, next) => {
-    // Intentar obtener token de cookie primero, luego de header
-    const token = req.cookies.token || req.headers['authorization']?.split(' ')[1];
-    
-    if (!token) {
-        return res.status(401).json({ success: false, message: 'Token no proporcionado' });
-    }
-    
-    try {
-        // Verificar token JWT
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        
-        // Verificar que la sesión existe en la base de datos
-        const [sesiones] = await pool.query(
-            'SELECT * FROM sesiones WHERE token = ? AND expiracion > NOW()',
-            [token]
-        );
-        
-        if (sesiones.length === 0) {
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Sesión expirada o inválida. Por favor inicia sesión nuevamente.' 
-            });
-        }
-        
-        req.user = decoded;
-        next();
-    } catch (error) {
-        console.error('Error al verificar token:', error);
-        if (error.name === 'TokenExpiredError') {
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Token expirado. Por favor inicia sesión nuevamente.' 
-            });
-        } else if (error.name === 'JsonWebTokenError') {
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Token inválido. Por favor inicia sesión nuevamente.' 
-            });
-        } else {
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Error al verificar token. Por favor inicia sesión nuevamente.' 
-            });
-        }
-    }
-};
-
 // Actualizar perfil
 router.put('/actualizar-perfil', verifyToken, verifyCSRF, async (req, res) => {
     try {
@@ -412,7 +376,7 @@ router.put('/actualizar-perfil', verifyToken, verifyCSRF, async (req, res) => {
 });
 
 // Cambiar contraseña
-router.put('/cambiar-password', verifyToken, verifyCSRF, async (req, res) => {
+router.put('/cambiar-password', verifyToken, verifyCSRF, passwordPolicyMiddleware, async (req, res) => {
     try {
         const { passwordActual, nuevaPassword } = req.body;
         
@@ -466,7 +430,7 @@ router.put('/cambiar-password', verifyToken, verifyCSRF, async (req, res) => {
 });
 
 // Login con MFA
-router.post('/login-mfa', async (req, res) => {
+router.post('/login-mfa', loginLimiter, async (req, res) => {
     try {
         const { telefono, password, mfaToken } = req.body;
 
@@ -679,7 +643,7 @@ router.get('/mfa/status', verifyToken, async (req, res) => {
 });
 
 // MFA - Generar secreto TOTP
-router.post('/mfa/generate', verifyToken, verifyCSRF, async (req, res) => {
+router.post('/mfa/generate', sensitiveLimiter, verifyToken, verifyCSRF, async (req, res) => {
     try {
         const [users] = await pool.query(
             'SELECT * FROM usuarios WHERE id_usuario = ?',
@@ -721,7 +685,7 @@ router.post('/mfa/generate', verifyToken, verifyCSRF, async (req, res) => {
 });
 
 // MFA - Habilitar MFA
-router.post('/mfa/enable', verifyToken, verifyCSRF, async (req, res) => {
+router.post('/mfa/enable', sensitiveLimiter, verifyToken, verifyCSRF, async (req, res) => {
     try {
         const { token: mfaToken } = req.body;
 
@@ -769,7 +733,7 @@ router.post('/mfa/enable', verifyToken, verifyCSRF, async (req, res) => {
 });
 
 // MFA - Verificar código TOTP
-router.post('/mfa/verify', verifyToken, verifyCSRF, async (req, res) => {
+router.post('/mfa/verify', sensitiveLimiter, verifyToken, verifyCSRF, async (req, res) => {
     try {
         const { token: mfaToken } = req.body;
 
@@ -811,7 +775,7 @@ router.post('/mfa/verify', verifyToken, verifyCSRF, async (req, res) => {
 });
 
 // MFA - Deshabilitar MFA
-router.post('/mfa/disable', verifyToken, verifyCSRF, async (req, res) => {
+router.post('/mfa/disable', sensitiveLimiter, verifyToken, verifyCSRF, async (req, res) => {
     try {
         await pool.query(
             'UPDATE usuarios SET mfa_enabled = FALSE, mfa_secret = NULL WHERE id_usuario = ?',
@@ -823,6 +787,17 @@ router.post('/mfa/disable', verifyToken, verifyCSRF, async (req, res) => {
     } catch (error) {
         console.error('Error al deshabilitar MFA:', error);
         res.status(500).json({ success: false, message: 'Error al deshabilitar MFA' });
+    }
+});
+
+// Endpoint público para exponer la clave pública RSA (verificación de firmas)
+router.get('/public-key', (req, res) => {
+    try {
+        res.type('application/x-pem-file');
+        res.send(getPublicKey());
+    } catch (error) {
+        console.error('Error al exponer clave pública:', error);
+        res.status(500).json({ success: false, message: 'Error al obtener clave pública' });
     }
 });
 
