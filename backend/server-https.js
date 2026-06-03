@@ -7,6 +7,10 @@ const crypto = require('crypto');
 const https = require('https');
 const fs = require('fs');
 require('dotenv').config();
+const { initKeyPair } = require('./utils/keys');
+
+// Inicializar par de claves RSA para firmas digitales
+initKeyPair();
 
 const authRoutes = require('./routes/auth');
 const reservasRoutes = require('./routes/reservas');

@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const passport = require('passport');
 const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
+const { getPublicKey } = require('../utils/keys');
 const { encrypt, decrypt, hashData, verifyHash, sanitizeInput } = require('../utils/security');
 
 require('../config/passport');
@@ -827,3 +828,13 @@ router.post('/mfa/disable', verifyToken, verifyCSRF, async (req, res) => {
 });
 
 module.exports = router;
+// Expone la clave pública RSA para que los clientes verifiquen firmas
+router.get('/public-key', (req, res) => {
+    try {
+        res.type('application/x-pem-file');
+        res.send(getPublicKey());
+    } catch (error) {
+        console.error('Error al exponer clave pública:', error);
+        res.status(500).json({ success: false, message: 'Error al obtener clave pública' });
+    }
+});

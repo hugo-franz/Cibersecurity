@@ -1,0 +1,36 @@
+# Agregar estas líneas a .gitignore (si no existen ya)
+# IMPORTANTE: las claves privadas NUNCA deben subirse al repositorio
+
+# Claves de firma digital
+/keys/
+keys/
+*.pem
+
+# Variables de entorno
+.env
+.env.local
+.env.production
+
+# Certificados SSL
+/ssl/
+ssl/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs
+*.log
+logs/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
